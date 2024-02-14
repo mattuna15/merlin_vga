@@ -5,7 +5,7 @@ use ieee.numeric_std.all;
 use std.textio.all;
 use IEEE.MATH_REAL.ALL;    -- For using the CEIL and LOG functions
 
-entity tile_display is
+entity tiled_text_display is
     generic (
       G_PALETTE_FILE : string;
       G_TILESET_FILE : string;
@@ -18,23 +18,31 @@ entity tile_display is
     );
     port (
         clk_i : in std_logic;
+        cpu_clock : in std_logic;
         reset_i : in std_logic;
-        
-                
+
         -- palette signals
         
         tile_pal_index_i : in std_logic_vector(7 downto 0);
         tile_pal_color_i : in std_logic_vector(23 downto 0);
         pal_wr_i : in std_logic;
         
+                -- text signals
+        rd_i : in std_logic;
+        wr_i : in std_logic;
+        char_x_i : in std_logic_vector(7 downto 0);
+        char_y_i : in std_logic_vector(7 downto 0);
+        disp_char_i : in std_logic_vector(7 downto 0); --character to be displayed
+        disp_char_o : out std_logic_vector(7 downto 0); --character to be displayed
+        
         -- vga signals
         pix_x_i : in std_logic_vector(9 downto 0);
         pix_y_i : in std_logic_vector(9 downto 0);
         rgb_o : out std_logic_vector(23 downto 0)
     );
-end tile_display;
+end tiled_text_display;
 
-architecture behavioral of tile_display is
+architecture behavioral of tiled_text_display is
 
 
 function log2ceil(val: natural) return natural is
@@ -97,28 +105,27 @@ type tile_data_t is array (0 to G_NUMBER_OF_TILES - 1) of tile_t;
 signal tile_data : tile_data_t := InitTilesFromFile(G_TILESET_FILE);
 signal tile : tile_t;
 signal index_x, index_y : natural;
-signal tile_addr : std_logic_vector(7 downto 0);
+signal tile_addr : std_logic_vector(7 downto 0); 
 
--- This reads the ROM contents from a text file
-type tile_grid is array(0 to (G_TILEMAP_HEIGHT * G_TILEMAP_WIDTH)-1 ) of std_logic_vector(7 downto 0);
+component dmem is
+   generic (
+      G_ADDR_BITS : integer;
+      G_DATA_WIDTH : integer
+   );
+   port (
+      -- Port A
+      a_clk_i  : in  std_logic;
+      a_addr_i : in  std_logic_vector(G_ADDR_BITS-1 downto 0);
+      a_data_o : out std_logic_vector(G_DATA_WIDTH-1 downto 0);
+      a_data_i : in  std_logic_vector(G_DATA_WIDTH-1 downto 0);
+      a_wren_i : in  std_logic;
 
-   impure function InitRamFromFile(RamFileName : in string) return tile_grid is
-      FILE RamFile : text;
-      variable RamFileLine : line;
-      variable RAM : tile_grid := (others => (others => '0'));
-   begin
-      file_open(RamFile, RamFileName, read_mode);
-      for i in tile_grid'range loop
-         readline (RamFile, RamFileLine);
-         hread (RamFileLine, RAM(i));
-         if endfile(RamFile) then
-            return RAM;
-         end if;
-      end loop;
-      return RAM;
-   end function;
-
-signal myGrid : tile_grid := InitRamFromFile(G_TILEMAP_FILE);
+      -- Port B
+      b_clk_i  : in  std_logic;
+      b_addr_i : in  std_logic_vector(G_ADDR_BITS-1 downto 0);
+      b_data_o : out std_logic_vector(G_DATA_WIDTH-1 downto 0)
+   );
+end component dmem;
 
    constant GLYPH_X_WIDTH: integer := log2ceil(G_TILE_WIDTH);
    constant GLYPH_Y_WIDTH: integer := log2ceil(G_TILE_HEIGHT);
@@ -126,14 +133,24 @@ signal myGrid : tile_grid := InitRamFromFile(G_TILEMAP_FILE);
    signal glyph_x :  std_logic_vector(GLYPH_X_WIDTH-1 downto 0); 
    signal glyph_y : std_logic_vector(GLYPH_Y_WIDTH-1 downto 0);
    signal bit_pos : natural;
+   
+   signal ena,wea : std_logic := '0';
+    
+    signal addra : std_logic_vector(19 downto 0);
+    signal addrb : std_logic_vector(12 downto 0);
 
     attribute dont_touch : string;
-    attribute dont_touch of get_pixel_colour : label is "true";
-    attribute dont_touch of glyph_x : signal is "true";
+    attribute dont_touch of rd_i, wr_i, glyph_x : signal is "true";
     attribute dont_touch of glyph_y : signal is "true";
-    attribute dont_touch of index_x : signal is "true";
-    attribute dont_touch of index_y : signal is "true";
-    attribute dont_touch of tile_addr : signal is "true";
+    attribute dont_touch of index_x, pix_x_i : signal is "true";
+    attribute dont_touch of index_y, pix_y_i : signal is "true";
+    attribute dont_touch of tile_addr, disp_char_i, disp_char_o, addra, addrb : signal is "true";
+
+-- Declaration of intermediate signals for two-cycle latency
+--signal glyph_x_delay1 : std_logic_vector(GLYPH_X_WIDTH-1 downto 0);
+--signal glyph_y_delay1 : std_logic_vector(GLYPH_Y_WIDTH-1 downto 0);
+        signal pixel : std_logic_vector(7 downto 0);
+        
 begin
 
 palette_set : process (clk_i, pal_wr_i)
@@ -148,50 +165,40 @@ begin
 
 end process;
 
- get_pixel_colour : process (pix_x_i, pix_y_i)
-    variable pixel : std_logic_vector(7 downto 0);
-    variable RGB24: std_logic_vector(23 downto 0);
-    variable tile_x, tile_y : natural; 
-    
-    begin
-    
-     --   if rising_edge(clk_i) then
---            -- Add logic to wrap around if scroll value exceeds tilemap dimensions
-              if index_x >= G_TILEMAP_WIDTH then
-                    tile_x := G_TILEMAP_WIDTH ; --- G_TILEMAP_WIDTH; stop scroll
-              else 
-                    tile_x := index_x;
-              end if;
-              if index_y >= G_TILEMAP_HEIGHT then
-                    tile_y :=  G_TILEMAP_HEIGHT;
-              else 
-                    tile_y := index_y;
-              end if;
---            elsif index_x < 0 then
---                index_x <= index_x + G_TILEMAP_WIDTH; 
---            end if;
+textgrid : dmem
+   generic map (
+      G_ADDR_BITS => 13,
+      G_DATA_WIDTH => 8
+   )
+   port map (
+      -- Port A
+      a_clk_i => cpu_clock,
+      a_addr_i => addra(12 downto 0),
+      a_data_o => disp_char_o,
+      a_data_i => disp_char_i,
+      a_wren_i => wea,
 
---            if index_y >= G_TILEMAP_HEIGHT then
---                index_y <= index_y; -- - G_TILEMAP_HEIGHT;
---            elsif index_y < 0 then
---                index_y <= index_y + G_TILEMAP_HEIGHT;
---            end if;
-
-            index_x <= to_integer(unsigned(pix_x_i(9 downto GLYPH_X_WIDTH))); --+ to_integer(unsigned(scroll_x));
-            index_y <= to_integer(unsigned(pix_y_i(9 downto GLYPH_Y_WIDTH))); --+ to_integer(unsigned(scroll_y));
-            glyph_x <= pix_x_i(GLYPH_X_WIDTH-1 downto 0);
-            glyph_y <= pix_y_i(GLYPH_Y_WIDTH-1 downto 0);
-
-            tile_addr <= myGrid(tile_y * G_TILEMAP_WIDTH + tile_x);
-            tile <= tile_data(to_integer(unsigned(tile_addr)));
-           
-            pixel := tile(to_integer(unsigned(glyph_y))*G_TILE_WIDTH + to_integer(unsigned(glyph_x)));
-
-            RGB24 := colours(to_integer(unsigned(pixel)));      
-            rgb_o <= RGB24;
-            
-  --     end if; 
-    
-    end process;
+      -- Port B
+      b_clk_i   => clk_i,
+      b_addr_i => addrb,
+      b_data_o => tile_addr
+   );
+  
+  addra <= "0000" & std_logic_vector(unsigned(char_y_i) * G_TILEMAP_WIDTH + unsigned(char_x_i)) 
+                when rd_i = '1' or wr_i = '1' else (others => '0');
+                
+  ena <= '1' when wr_i = '1' or rd_i = '1' else '0';
+  wea <= '1' when wr_i = '1' else '0';
+  
+  glyph_x <= pix_x_i(GLYPH_X_WIDTH-1 downto 0);
+  glyph_y <= pix_y_i(GLYPH_Y_WIDTH-1 downto 0);
+  
+  addrb <= std_logic_vector(to_unsigned(index_y * G_TILEMAP_WIDTH + index_x, 13));
+  index_x <= to_integer(unsigned(pix_x_i(9 downto GLYPH_X_WIDTH))); --+ to_integer(unsigned(scroll_x));
+  index_y <= to_integer(unsigned(pix_y_i(9 downto GLYPH_Y_WIDTH))); --+ to_integer(unsigned(scroll_y));
+  tile <= tile_data(to_integer(unsigned(tile_addr)));
+  pixel <= tile(to_integer(unsigned(glyph_y))*G_TILE_WIDTH + to_integer(unsigned(glyph_x)));
+  rgb_o <= colours(to_integer(unsigned(pixel)));      
+ 
    
 end Behavioral;

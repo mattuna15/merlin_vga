@@ -24,18 +24,11 @@ use ieee.numeric_std_unsigned.all;
 use ieee.numeric_std.all;
 use std.textio.all;
 
---use IEEE.STD_LOGIC_ARITH.ALL;
-
--- Uncomment the following library declaration if using
--- arithmetic functions with Signed or Unsigned values
---use IEEE.NUMERIC_STD.ALL;
-
--- Uncomment the following library declaration if instantiating
--- any Xilinx leaf cells in this code.
---library UNISIM;
---use UNISIM.VComponents.all;
-
 entity bitmap_vga is
+ generic (
+            SCREEN_WIDTH : integer := 640;  -- Adjust as needed
+            SCREEN_HEIGHT : integer := 480 -- Adjust as needed
+        );
  Port (        
  
         clk_i : in std_logic;
@@ -55,7 +48,7 @@ entity bitmap_vga is
         -- vga signals
         pix_x_i : in std_logic_vector(9 downto 0);
         pix_y_i : in std_logic_vector(9 downto 0);
-        pix_o : out std_logic_vector(11 downto 0)  -- 8-bit color output);
+        rgb_o : out std_logic_vector(23 downto 0)
         );
 end bitmap_vga;
 
@@ -119,12 +112,12 @@ bitmap: blk_mem_gen_0
     doutb => palette_index
   );
 
-palette_set : process (clk_i, pal_wr_i)
+palette_set : process (clk_i)
 variable colour_index : integer;
 
 begin
  
-    if rising_edge (pal_wr_i) then
+    if (rising_edge(clk_i) and pal_wr_i = '1') then
         colour_index := to_integer(unsigned(bmp_pal_index_i));
         colours(colour_index) <= bmp_pal_color_i;
     end if;
@@ -141,8 +134,7 @@ begin
             addr_temp := to_integer(unsigned(pix_y_i)) * 640 + to_integer(unsigned(pix_x_i));
             addr_b <= std_logic_vector(to_unsigned(addr_temp, addr_b'length));
             RGB24 := colours(TO_INTEGER(unsigned(palette_index)));
-            
-            pix_o <= RGB24(23 downto 20) & RGB24(15 downto 12) & RGB24(7 downto 4);
+            rgb_o <= RGB24;
             
     end if;
 
